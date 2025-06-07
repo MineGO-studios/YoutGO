@@ -1,0 +1,13 @@
+Copyright (c) 2025 MJ / MineGO Studio
+
+Permission is granted to use, copy, and modify this software for personal, non-commercial purposes only.
+
+You are NOT allowed to:
+- Redistribute this software (as EXE or source) to others, in any form, without explicit written permission.
+- Use for commercial purposes or bundle into any paid or for-profit product.
+- Reverse engineer, decompile, or attempt to extract the source from compiled executables.
+- Bypass or remove this license.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+
+All rights reserved.
