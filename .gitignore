@@ -5,3 +5,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.exe
+icon.ico
+icon_transparent.png
+splash.png
+minego_tokens.json
+minego_tokens.css

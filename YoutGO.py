@@ -1,388 +1,443 @@
 import sys
 import os
-import ttkbootstrap as tb
-from ttkbootstrap.constants import *
-from ttkbootstrap.scrolled import ScrolledText
-from tkinter import filedialog, PhotoImage, ttk, Toplevel, StringVar, BooleanVar
+import locale
 import threading
+import json
+from pathlib import Path
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QComboBox, QCheckBox, QFileDialog, QTextEdit,
+    QProgressBar, QListWidget, QListWidgetItem, QFrame, QMessageBox
+)
+from PyQt6.QtGui import QIcon, QPixmap, QAction
+from PyQt6.QtCore import Qt, QTimer, QLocale
+import qdarktheme as pyqtdarktheme
+
+# Use yt-dlp (pip install yt-dlp)
 import yt_dlp
-import logging
 
 # --- App meta ---
 APP_NAME = "YoutGO"
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.2.0"
 APP_OWNER = "MJ"
 APP_COMPANY = "MineGO Studio"
-APP_DATE = "2025/6/6"
+APP_DATE = "2025/6/29"
 
-def resource_path(relative_path):
+# --- Color tokens (Material/Brand) ---
+MINEGO_PRIMARY = "#F84D39"    # Red
+MINEGO_YELLOW = "#F8B530"     # Yellow
+MINEGO_GREEN = "#1CE8A3"      # Green
+MINEGO_SURFACE_DARK = "#22232A"
+MINEGO_SURFACE_LIGHT = "#FFFFFF"
+MINEGO_TEXT_DARK = "#EFEFEF"
+MINEGO_TEXT_LIGHT = "#1a1a1a"
+
+# --- Paths ---
+def default_download_path():
+    home = os.path.expanduser("~")
+    path = os.path.join(home, "YoutGO downloads")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".youtgo_settings.json")
+HISTORY_FILE = os.path.join(os.path.expanduser("~"), ".youtgo_history.json")
+
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"download_path": default_download_path()}
+
+def save_settings(settings):
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f)
+
+def detect_os_language():
     try:
-        base_path = sys._MEIPASS
+        lang = QLocale.system().name()
+        if lang:
+            return lang.split("_")[0]
     except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+        pass
+    try:
+        lang = locale.getdefaultlocale()[0]
+        if lang:
+            return lang.split("_")[0]
+    except Exception:
+        pass
+    return "en"
 
-def center_window(win, width, height):
-    win.update_idletasks()
-    screen_width = win.winfo_screenwidth()
-    screen_height = win.winfo_screenheight()
-    x = (screen_width // 2) - (width // 2)
-    y = (screen_height // 2) - (height // 2)
-    win.geometry(f"{width}x{height}+{x}+{y}")
+def resource_path(filename):
+    if hasattr(sys, "_MEIPASS"):
+        return os.path.join(sys._MEIPASS, filename)
+    return os.path.join(os.path.abspath("."), filename)
 
-logging.basicConfig(filename='ytdl_app.log', level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+# --- Splash Screen ---
+class SplashScreen(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(480, 300)
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-try:
-    with open(resource_path("LICENSE.txt"), "r", encoding="utf-8") as f:
-        LICENSE_TEXT = f.read()
-except Exception:
-    LICENSE_TEXT = "License file not found."
+        logo_path = resource_path("icon_transparent.png")
+        if os.path.exists(logo_path):
+            pix = QPixmap(logo_path).scaled(112, 112, Qt.AspectRatioMode.KeepAspectRatio,
+                                            Qt.TransformationMode.SmoothTransformation)
+            logo_label = QLabel()
+            logo_label.setPixmap(pix)
+            logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(logo_label)
 
-ABOUT_TEXT = (
-    f"{APP_NAME} — YouTube Downloader\n"
-    f"Version {APP_VERSION}\n"
-    f"Created: {APP_DATE}\n"
-    f"By {APP_OWNER} / {APP_COMPANY}\n\n"
-    "YoutGO is a privacy-friendly, personal-use YouTube downloader built for speed, reliability, "
-    "and a premium user experience. Redistribution and reverse engineering are prohibited.\n"
-    "See License tab for full terms."
-)
+        title = QLabel(f"<b style='font-size:30pt'>{APP_NAME}</b>")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
 
-class YoutGOApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title(f"{APP_NAME} - YouTube Downloader")
-        self.root.geometry("930x770")
-        self.root.resizable(False, False)
-        try:
-            self.root.iconbitmap(resource_path("icon.ico"))
-        except Exception:
-            pass
+        subtitle = QLabel("Modern YouTube Downloader\nby MineGO Studio")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setStyleSheet("font-size:13pt; color: #666;")
+        layout.addWidget(subtitle)
+        layout.addSpacing(24)
+        loading = QLabel("Loading…")
+        loading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(loading)
+        self.setLayout(layout)
 
-        self.download_path = tb.StringVar(value=os.path.expanduser("~"))
-        self.style = tb.Style(theme="flatly")  # Trusted, light, harmonious
+class DownloadItem:
+    def __init__(self, url, title=None, status="Waiting", progress=0):
+        self.url = url
+        self.title = title or url
+        self.status = status
+        self.progress = progress
 
-        notebook = ttk.Notebook(root)
-        notebook.pack(fill="both", expand=True, padx=0, pady=0)
+class YoutGOApp(QMainWindow):
+    def __init__(self, app, lang='en'):
+        super().__init__()
+        self.app = app
+        self.lang = lang
+        self.setWindowTitle(f"{APP_NAME} - YouTube Downloader")
+        self.setWindowIcon(QIcon(resource_path("icon.ico")))
+        self.setMinimumSize(980, 700)
+        self.tray_icon = None
+        self.tray_enabled = False
 
-        # -------- Home Tab --------
-        home_frame = tb.Frame(notebook, bootstyle=SECONDARY)
-        notebook.add(home_frame, text="  Home  ")
+        # State
+        self.settings = load_settings()
+        self.download_path = self.settings.get("download_path", default_download_path())
+        self.queue = []
+        self.downloading = False
+        self.history = []
 
-        # --- Header with Card Style and Logo ---
-        header_frame = tb.Frame(home_frame, bootstyle=LIGHT)
-        header_frame.pack(pady=(8, 0), padx=0, fill="x")
-        try:
-            logo_img_raw = PhotoImage(file=resource_path("icon_transparent.png"))
-            # Scale the logo to about 32px high (emoji: ~26–32px), keeping aspect ratio
-            logo_h = logo_img_raw.height()
-            scale = max(1, int(logo_h / 128))  # integer scaling
-            logo_img = logo_img_raw.subsample(scale)
-            icon_label = tb.Label(header_frame, image=logo_img, bootstyle=INFO)
-            icon_label.image = logo_img  # Prevent garbage collection
-            icon_label.pack(side="left", padx=(15, 12), pady=4)
-        except Exception:
-            icon_label = tb.Label(header_frame, text="🎬", font=("Segoe UI Emoji", 26), bootstyle=PRIMARY)
-            icon_label.pack(side="left", padx=(15, 12), pady=4)
-        title_label = tb.Label(header_frame, text="YoutGO", font=("Segoe UI", 20, "bold"), bootstyle=PRIMARY)
-        title_label.pack(side="left", padx=(0, 4), pady=4)
-        subtitle = tb.Label(header_frame, text="Safe & Fast YouTube Downloads — by MineGO Studio",
-                            font=("Segoe UI", 11), bootstyle=INFO)
-        subtitle.pack(side="left", padx=18, pady=4)
+        self.tabs = QTabWidget(documentMode=True)
+        self.setCentralWidget(self.tabs)
 
+        self.setup_menus()
+        self.tabs.addTab(self.home_tab(), self.tr("Home"))
+        self.tabs.addTab(self.history_tab(), self.tr("History"))
+        self.tabs.addTab(self.about_tab(), self.tr("About"))
+        self.tabs.addTab(self.license_tab(), self.tr("License"))
+        self.apply_theme("dark")
+        self.setup_clipboard_monitor()
 
-        # --- Input + Controls (No Overflow, Large and Clear) ---
-        input_frame = tb.LabelFrame(home_frame, text=" Paste Links Below ", bootstyle=PRIMARY)
-        input_frame.pack(padx=18, pady=(18, 10), fill="x")
-        self.links_text = ScrolledText(input_frame, width=100, height=5, font=("Segoe UI", 10), bootstyle=INFO)
-        self.links_text.pack(padx=8, pady=10, fill="x")
+    def setup_menus(self):
+        menubar = self.menuBar()
+        view_menu = menubar.addMenu(self.tr("View"))
+        self.toggle_theme_action = QAction(self.tr("Dark Mode"), self, checkable=True)
+        self.toggle_theme_action.triggered.connect(self.toggle_theme)
+        view_menu.addAction(self.toggle_theme_action)
+        self.toggle_theme_action.setChecked(True)
+        edit_menu = menubar.addMenu(self.tr("Edit"))
+        browse_action = QAction(self.tr("Change Download Folder"), self)
+        browse_action.triggered.connect(self.choose_folder)
+        edit_menu.addAction(browse_action)
 
-        controls_frame = tb.LabelFrame(home_frame, text=" Choose Options ", bootstyle=PRIMARY)
-        controls_frame.pack(padx=18, pady=4, fill="x")
+    def toggle_theme(self, checked):
+        self.apply_theme("dark" if checked else "light")
 
-        # Output format selector
-        self.format_var = tb.StringVar(value="mp4")
-        tb.Label(controls_frame, text="Format:", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, padx=(8, 3), pady=8, sticky="w")
-        self.format_box = ttk.Combobox(controls_frame, values=["mp4", "mp3", "m4a", "wav"], textvariable=self.format_var, width=8, state="readonly")
-        self.format_box.grid(row=0, column=1, padx=(0, 15), pady=8, sticky="w")
-        self.format_box.set("mp4")
-
-        # Quality selector
-        self.quality_var = tb.StringVar(value="best")
-        tb.Label(controls_frame, text="Quality:", font=("Segoe UI", 10, "bold")).grid(row=0, column=2, padx=(8, 3), pady=8, sticky="w")
-        self.quality_box = ttk.Combobox(controls_frame, values=["best", "1080p", "720p", "480p", "360p", "audio only"], textvariable=self.quality_var, width=12, state="readonly")
-        self.quality_box.grid(row=0, column=3, padx=(0, 15), pady=8, sticky="w")
-        self.quality_box.set("best")
-
-        # Max threads
-        tb.Label(controls_frame, text="Parallel:", font=("Segoe UI", 10, "bold")).grid(row=0, column=4, padx=(8, 3), pady=8, sticky="w")
-        self.max_threads_var = tb.IntVar(value=2)
-        self.threads_box = ttk.Combobox(controls_frame, values=[1, 2, 3, 4, 5], textvariable=self.max_threads_var, width=3, state="readonly")
-        self.threads_box.grid(row=0, column=5, padx=(0, 8), pady=8, sticky="w")
-        self.threads_box.set("2")
-
-        # Playlist
-        self.playlist_var = BooleanVar(value=False)
-        tb.Checkbutton(
-            controls_frame,
-            text="Download all videos from playlist links",
-            variable=self.playlist_var,
-            bootstyle=INFO
-        ).grid(row=0, column=6, padx=(10, 4), pady=8, sticky="w")
-
-        # Output path
-        path_frame = tb.LabelFrame(home_frame, text=" Save To ", bootstyle=PRIMARY)
-        path_frame.pack(padx=18, pady=(10, 8), fill="x")
-        tb.Label(path_frame, text="Folder:", font=("Segoe UI", 10)).pack(side="left", padx=(12, 3), pady=6)
-        self.path_label = tb.Label(path_frame, textvariable=self.download_path, font=("Consolas", 10), bootstyle=INFO)
-        self.path_label.pack(side="left", padx=8)
-        tb.Button(path_frame, text="Browse", bootstyle=SECONDARY, command=self.browse_path).pack(side="left", padx=8)
-
-        # Download button (big and inviting)
-        self.download_btn = tb.Button(
-            home_frame,
-            text="⬇ Download All",
-            bootstyle=SUCCESS,
-            command=self.start_batch_download,
-            width=25,
-            padding=8
+    def apply_theme(self, mode):
+        self.current_theme = mode
+        pyqtdarktheme.setup_theme(
+            mode,
+            corner_shape="rounded",
+            custom_colors={
+                "primary": MINEGO_PRIMARY,
+                "background": MINEGO_SURFACE_LIGHT if mode == "light" else MINEGO_SURFACE_DARK,
+            }
         )
-        self.download_btn.pack(pady=(10, 2))
 
-        # Progress Bar (wider, no overflow)
-        progress_frame = tb.Frame(home_frame, bootstyle=SECONDARY)
-        progress_frame.pack(pady=(3, 0))
-        self.progress_var = tb.DoubleVar(value=0)
-        self.progress_bar = ttk.Progressbar(progress_frame, orient="horizontal", length=600, mode="determinate", variable=self.progress_var)
-        self.progress_bar.pack(side="left", padx=(25, 8))
-        self.percent_var = StringVar(value="0%")
-        self.percent_label = tb.Label(progress_frame, textvariable=self.percent_var, font=("Segoe UI", 10, "bold"), bootstyle=INFO)
-        self.percent_label.pack(side="left", padx=2)
+    # --- Home Tab ---
+    def home_tab(self):
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setSpacing(14)
+        # Title
+        title = QLabel("YoutGO")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(f"font-size:20pt; font-weight:700; color:{MINEGO_PRIMARY};")
+        layout.addWidget(title)
+        # Link input
+        hlayout = QHBoxLayout()
+        self.link_input = QTextEdit()
+        self.link_input.setPlaceholderText(self.tr("Paste YouTube links (one per line)"))
+        self.link_input.setMinimumHeight(60)
+        hlayout.addWidget(self.link_input)
+        add_btn = QPushButton("Add to Queue")
+        add_btn.clicked.connect(self.add_links_to_queue)
+        hlayout.addWidget(add_btn)
+        layout.addLayout(hlayout)
+        # Queue list
+        self.queue_list = QListWidget()
+        layout.addWidget(self.queue_list)
+        remove_btn = QPushButton("Remove Selected")
+        remove_btn.clicked.connect(self.remove_selected_from_queue)
+        layout.addWidget(remove_btn)
+        # Download options
+        opt_layout = QHBoxLayout()
+        opt_layout.addWidget(QLabel("Format:"))
+        self.format_box = QComboBox()
+        self.format_box.addItems(["mp4", "mp3", "m4a", "wav"])
+        opt_layout.addWidget(self.format_box)
+        opt_layout.addSpacing(14)
+        opt_layout.addWidget(QLabel("Quality:"))
+        self.quality_box = QComboBox()
+        self.quality_box.addItems(["best", "1080p", "720p", "480p", "360p", "audio only"])
+        opt_layout.addWidget(self.quality_box)
+        opt_layout.addSpacing(14)
+        opt_layout.addWidget(QLabel("Download at the same time:"))
+        self.threads_box = QComboBox()
+        self.threads_box.addItems([str(i) for i in range(1, 6)])
+        self.threads_box.setCurrentText("2")
+        opt_layout.addWidget(self.threads_box)
+        opt_layout.addSpacing(14)
+        self.playlist_box = QCheckBox("Download full playlist if link is playlist")
+        opt_layout.addWidget(self.playlist_box)
+        layout.addLayout(opt_layout)
+        # Output folder display
+        folder_layout = QHBoxLayout()
+        folder_layout.addWidget(QLabel("Download folder:"))
+        self.folder_label = QLabel(self.download_path)
+        folder_layout.addWidget(self.folder_label)
+        folder_btn = QPushButton("Browse")
+        folder_btn.clicked.connect(self.choose_folder)
+        folder_layout.addWidget(folder_btn)
+        folder_layout.addStretch()
+        layout.addLayout(folder_layout)
+        # Download button
+        self.download_btn = QPushButton("Start Download")
+        self.download_btn.clicked.connect(self.start_download_batch)
+        layout.addWidget(self.download_btn)
+        # Progress bar
+        self.progress = QProgressBar()
+        self.progress.setMinimum(0)
+        self.progress.setMaximum(100)
+        layout.addWidget(self.progress)
+        # Log
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMinimumHeight(80)
+        layout.addWidget(self.log)
+        return w
 
-        # Status/Log (spacious, readable)
-        log_frame = tb.LabelFrame(home_frame, text=" Status & Log ", bootstyle=INFO)
-        log_frame.pack(padx=18, pady=(12, 7), fill="both", expand=True)
-        self.status_text = ScrolledText(log_frame, width=107, height=7, font=("Consolas", 10), bootstyle=LIGHT)
-        self.status_text.pack(padx=8, pady=8, fill="both", expand=True)
-        self.status_text.text.config(state="disabled")
+    def add_links_to_queue(self):
+        links = self.link_input.toPlainText().strip().splitlines()
+        for link in links:
+            link = link.strip()
+            if link and link not in [self.queue_list.item(i).text() for i in range(self.queue_list.count())]:
+                self.queue_list.addItem(link)
+        self.link_input.clear()
 
-        # --- About Tab ---
-        about_frame = tb.Frame(notebook)
-        notebook.add(about_frame, text="  About  ")
-        about_card = tb.Frame(about_frame, bootstyle=LIGHT)
-        about_card.pack(pady=35, padx=22, fill="both", expand=True)
-        tb.Label(
-            about_card, text=APP_NAME, font=("Segoe UI", 21, "bold"), bootstyle=PRIMARY
-        ).pack(pady=(0, 8))
-        tb.Label(
-            about_card, text=f"Version: {APP_VERSION}    Created: {APP_DATE}", font=("Segoe UI", 11, "italic"), bootstyle=INFO
-        ).pack(pady=(0, 16))
-        tb.Label(
-            about_card,
-            text="YoutGO is a privacy-friendly, modern YouTube downloader for personal use.\nDeveloped by MJ (MineGO Studio).",
-            font=("Segoe UI", 12),
-            bootstyle=SECONDARY,
-            justify="center"
-        ).pack(pady=(0, 16))
-        tb.Label(
-            about_card,
-            text="Contact: coming soon  |  https://minego.studio/",
-            font=("Segoe UI", 10, "underline"),
-            bootstyle=INFO
-        ).pack(pady=(0, 8))
+    def remove_selected_from_queue(self):
+        for item in self.queue_list.selectedItems():
+            self.queue_list.takeItem(self.queue_list.row(item))
 
-        # --- License Tab ---
-        license_frame = tb.Frame(notebook)
-        notebook.add(license_frame, text="  License  ")
-        license_card = tb.Frame(license_frame, bootstyle=LIGHT)
-        license_card.pack(padx=18, pady=18, fill="both", expand=True)
-        tb.Label(
-            license_card,
-            text="License Agreement",
-            font=("Segoe UI", 15, "bold"),
-            bootstyle=PRIMARY,
-        ).pack(pady=(0, 12))
-        license_text = ScrolledText(license_card, width=94, height=18, font=("Consolas", 9), bootstyle=INFO)
-        license_text.pack(padx=4, pady=4, fill="both", expand=True)
-        license_text.text.insert("1.0", LICENSE_TEXT)
-        license_text.text.config(state="disabled")
-
-        tb.Label(
-            root,
-            text=f"© {APP_DATE[:4]} {APP_OWNER} / {APP_COMPANY} | Personal use only | Do not redistribute or decompile",
-            font=("Segoe UI", 8),
-            bootstyle=SECONDARY
-        ).pack(side="bottom", pady=4)
-
-    def browse_path(self):
-        folder = filedialog.askdirectory()
+    def choose_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Download Folder", self.download_path)
         if folder:
-            self.download_path.set(folder)
+            self.download_path = folder
+            self.folder_label.setText(folder)
+            self.settings['download_path'] = folder
+            save_settings(self.settings)
 
-    def start_batch_download(self):
-        links = self.links_text.get("1.0", "end").strip()
-        link_list = [l.strip() for l in links.splitlines() if l.strip()]
-        if not link_list:
-            tb.dialogs.messagebox.show_error("Input Error", "Please enter at least one valid YouTube link.")
+    def start_download_batch(self):
+        if self.downloading:
+            self.log.append("Already downloading, please wait...")
             return
-        self.download_btn.config(state="disabled")
-        self.progress_var.set(0)
-        self.percent_var.set("0%")
-        self.status_text.text.config(state="normal")
-        self.status_text.text.delete("1.0", "end")
-        self.status_text.text.insert("end", f"🚀 Downloading {len(link_list)} link(s) (up to {self.max_threads_var.get()} at once)...\n")
-        self.status_text.text.config(state="disabled")
-        download_as_playlist = self.playlist_var.get()
-        format_choice = self.format_var.get()
-        quality_choice = self.quality_var.get()
-        max_threads = self.max_threads_var.get()
-        download_path = self.download_path.get()
-
-        def download_worker(url):
-            self.progress_var.set(0)
-            self.percent_var.set("0%")
-            self.download_video(
-                url, format_choice, download_path,
-                as_playlist=download_as_playlist, quality=quality_choice)
-
-        def batch_threader():
-            threads = []
-            for link in link_list:
-                while True:
-                    threads = [t for t in threads if t.is_alive()]
-                    if len(threads) < max_threads:
-                        t = threading.Thread(target=download_worker, args=(link,), daemon=True)
-                        t.start()
-                        threads.append(t)
-                        break
-                    else:
-                        import time; time.sleep(0.1)
-            for t in threads:
-                t.join()
-            self.download_btn.config(state="normal")
-        threading.Thread(target=batch_threader, daemon=True).start()
-
-    def download_video(self, url, format_choice, path, as_playlist=False, quality="best"):
-        if not url.startswith("http"):
-            self.update_status(url, "❌ Skipped: Invalid URL.\n", "danger")
+        urls = [self.queue_list.item(i).text() for i in range(self.queue_list.count())]
+        if not urls:
+            self.log.append("No links in the queue.")
             return
+        fmt = self.format_box.currentText()
+        qual = self.quality_box.currentText()
+        n_threads = int(self.threads_box.currentText())
+        as_playlist = self.playlist_box.isChecked()
+        folder = self.download_path
+        self.downloading = True
+        self.download_btn.setEnabled(False)
+        self.progress.setValue(0)
+        self.log.clear()
+
+        # Prepare list of DownloadItem
+        items = [DownloadItem(url) for url in urls]
+
+        # Threading download for batch
+        def download_all():
+            completed = 0
+            for i, item in enumerate(items):
+                # Skip file if exists
+                fn_guess = self.guess_filename(item.url, fmt, folder)
+                if fn_guess and os.path.exists(fn_guess):
+                    self.log.append(f"[SKIP] {fn_guess} already exists.")
+                    continue
+                result = self.download_one(item.url, fmt, qual, as_playlist, folder)
+                self.log.append(result)
+                completed += 1
+                pct = int((completed / len(items)) * 100)
+                QTimer.singleShot(0, lambda v=pct: self.progress.setValue(v))
+            self.log.append("Batch done.")
+            self.downloading = False
+            self.download_btn.setEnabled(True)
+
+        threading.Thread(target=download_all, daemon=True).start()
+
+    def guess_filename(self, url, fmt, folder):
+        # Quick guess for filename (for skip)
+        try:
+            info = yt_dlp.YoutubeDL().extract_info(url, download=False)
+            title = info.get('title', 'video')
+            ext = fmt if fmt != "audio only" else "mp3"
+            filename = f"{title}.{ext}"
+            return os.path.join(folder, filename)
+        except Exception:
+            return None
+
+    def download_one(self, url, fmt, qual, as_playlist, folder):
         ydl_opts = {
-            "outtmpl": os.path.join(path, "%(title)s.%(ext)s"),
+            "outtmpl": os.path.join(folder, "%(title)s.%(ext)s"),
             "quiet": True,
-            "progress_hooks": [lambda d: self.hook(d, url)],
-            "geo_bypass": True,
+            "noplaylist": not as_playlist,
+            "format": None
         }
-        ydl_opts["noplaylist"] = not as_playlist
-        if format_choice == "mp3":
-            ydl_opts.update({
-                "format": "bestaudio/best",
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }]
-            })
-        elif format_choice == "wav":
-            ydl_opts.update({
-                "format": "bestaudio/best",
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "wav",
-                    "preferredquality": "0",
-                }]
-            })
-        elif format_choice == "m4a":
-            ydl_opts.update({
-                "format": "bestaudio[ext=m4a]",
-            })
-        else:
-            format_str = None
-            if quality == "best":
-                format_str = "bestvideo+bestaudio/best"
-            elif quality == "audio only":
-                format_str = "bestaudio/best"
+        # Format
+        if fmt == "mp3":
+            ydl_opts["format"] = "bestaudio/best"
+            ydl_opts["postprocessors"] = [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }]
+        elif fmt == "wav":
+            ydl_opts["format"] = "bestaudio/best"
+            ydl_opts["postprocessors"] = [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "wav",
+            }]
+        elif fmt == "m4a":
+            ydl_opts["format"] = "bestaudio[ext=m4a]"
+        else:  # mp4 or default
+            if qual == "best":
+                ydl_opts["format"] = "bestvideo+bestaudio/best"
+            elif qual == "audio only":
+                ydl_opts["format"] = "bestaudio/best"
             else:
-                format_str = f'bestvideo[height={quality.replace("p","")}]'+\
-                    '+bestaudio/best'
-            ydl_opts.update({
-                "format": format_str,
-                "merge_output_format": "mp4" if format_choice == "mp4" else format_choice
-            })
+                height = qual.replace("p", "")
+                ydl_opts["format"] = f"bestvideo[height={height}]+bestaudio/best"
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
-            self.update_status(url, "✅ Download completed.\n", "success")
-            logging.info(f"Download successful: {url} as {format_choice} ({quality})")
+            return f"[OK] {url}"
         except Exception as e:
-            self.update_status(url, f"❌ Download failed: {str(e)}\n", "danger")
-            logging.error(f"Error downloading {url}: {e}")
-        self.progress_var.set(0)
-        self.percent_var.set("0%")
+            return f"[ERROR] {url} :: {e}"
 
-    def hook(self, d, url):
-        if d['status'] == 'downloading':
-            downloaded = d.get('downloaded_bytes', 0)
-            total = d.get('total_bytes', d.get('total_bytes_estimate', 0))
-            if total:
-                percent = min(max(downloaded / total * 100, 0), 100)
-                self.progress_var.set(percent)
-                self.percent_var.set(f"{int(percent)}%")
-                self.progress_bar.update_idletasks()
-        elif d['status'] == 'finished':
-            self.progress_var.set(100)
-            self.percent_var.set("100%")
-            self.progress_bar.update_idletasks()
-            self.update_status(url, "🛠️ Processing...\n", "warning")
+    # --- History tab stub ---
+    def history_tab(self):
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.addWidget(QLabel("History will be here (Phase 2)."))
+        return w
 
-    def update_status(self, url, msg, style, replace_last=False):
-        self.status_text.text.config(state="normal")
-        color = {"success": "#30e36b", "danger": "#ff4848", "info": "#007bff", "warning": "#ffb347"}
-        tag = style
-        if tag not in self.status_text.text.tag_names():
-            self.status_text.text.tag_configure(tag, foreground=color[style])
-        if replace_last:
-            content = self.status_text.text.get("1.0", "end")
-            lines = content.strip().split('\n')
-            if lines:
-                lines[-1] = f"[{url[:40]}...] {msg.strip()}"
-                self.status_text.text.delete("1.0", "end")
-                for ln in lines:
-                    self.status_text.text.insert("end", ln + "\n", tag)
-            else:
-                self.status_text.text.insert("end", f"[{url[:40]}...] {msg}", tag)
-        else:
-            self.status_text.text.insert("end", f"[{url[:40]}...] {msg}", tag)
-        self.status_text.text.see("end")
-        self.status_text.text.config(state="disabled")
+    # --- About/License ---
+    def about_tab(self):
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setAlignment(Qt.AlignmentFlag.AlignTop)
+        l.addSpacing(30)
+        title = QLabel(f"{APP_NAME} — YouTube Downloader")
+        title.setStyleSheet(f"font-size:20pt; font-weight:700; color:{MINEGO_PRIMARY};")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        l.addWidget(title)
+        subtitle = QLabel(f"Version {APP_VERSION} | Created {APP_DATE} | by {APP_OWNER} / {APP_COMPANY}")
+        subtitle.setStyleSheet("font-size:13pt; color: #888;")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        l.addWidget(subtitle)
+        info = QLabel("YoutGO is a privacy-friendly YouTube downloader for personal use.\nContact: minego.studios@gmail.com | Discord: @mnjaa64")
+        info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        info.setStyleSheet("font-size:12pt; color:#222;")
+        l.addWidget(info)
+        return w
 
-def show_splash_and_start():
-    root = tb.Window(themename="flatly")
-    root.withdraw()
-    splash = Toplevel(root)
-    splash.overrideredirect(True)
-    center_window(splash, 500, 300)
-    try:
-        splash_img = PhotoImage(file=resource_path("splash.png"))
-        splash_label = tb.Label(splash, image=splash_img)
-        splash_label.image = splash_img
-        splash_label.pack(fill="both", expand=True)
-    except Exception:
-        splash_label = tb.Label(splash, text=APP_NAME, font=("Segoe UI", 30, "bold"), bootstyle=PRIMARY)
-        splash_label.pack(fill="both", expand=True)
-    tb.Label(
-        splash,
-        text=f"Powered by {APP_OWNER} | {APP_NAME}\nPlease wait...",
-        font=("Segoe UI", 12),
-        bootstyle=SECONDARY
-    ).pack(side="bottom", pady=8)
+    def license_tab(self):
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setAlignment(Qt.AlignmentFlag.AlignTop)
+        l.addSpacing(30)
+        title = QLabel("License Agreement")
+        title.setStyleSheet(f"font-size:17pt; font-weight:700; color:{MINEGO_PRIMARY};")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        l.addWidget(title)
+        try:
+            with open(resource_path("LICENSE.txt"), "r", encoding="utf-8") as f:
+                text = f.read()
+        except:
+            text = "License file not found."
+        tb = QTextEdit()
+        tb.setReadOnly(True)
+        tb.setPlainText(text)
+        tb.setStyleSheet("font-size:11pt; background:#282a36; border-radius:10px; color: #F8B530;")
+        l.addWidget(tb)
+        return w
 
-    def start_main_app():
-        splash.destroy()
-        root.deiconify()
-        YoutGOApp(root)
-    splash.after(2000, start_main_app)
-    root.mainloop()
+    # --- Clipboard monitor ---
+    def setup_clipboard_monitor(self):
+        clipboard = self.app.clipboard()
+        clipboard.dataChanged.connect(self.check_clipboard_for_url)
+
+    def check_clipboard_for_url(self):
+        text = self.app.clipboard().text()
+        if text and ("youtube.com" in text or "youtu.be" in text):
+            if text not in [self.queue_list.item(i).text() for i in range(self.queue_list.count())]:
+                self.queue_list.addItem(text)
+                self.log.append(f"[Clipboard] Added {text}")
+
+def main():
+    app = QApplication(sys.argv)
+    lang = detect_os_language()
+    splash = SplashScreen()
+    splash.show()
+
+    def start_main():
+        global main_window
+        splash.close()
+        try:
+            main_window = YoutGOApp(app, lang=lang)
+            main_window.show()
+            print("Main window launched successfully!")
+        except Exception as e:
+            import traceback
+            print("=== App crashed! ===")
+            traceback.print_exc()
+            msg = QMessageBox()
+            msg.setWindowTitle("App Startup Error")
+            msg.setText(f"YoutGO failed to launch!\n\n{e}")
+            msg.setDetailedText(traceback.format_exc())
+            msg.setIcon(QMessageBox.Icon.Critical)
+            msg.exec()
+
+    QTimer.singleShot(1700, start_main)
+    sys.exit(app.exec())
+
+
 
 if __name__ == "__main__":
-    show_splash_and_start()
+    main()
